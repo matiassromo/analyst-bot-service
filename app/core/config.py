@@ -60,14 +60,13 @@ class Settings(BaseSettings):
         """
         Generate SQL Server connection string for pyodbc.
 
-        Format: DRIVER={driver};SERVER=host,port;DATABASE=db;UID=user;PWD=pass
+        Format: DRIVER={driver};SERVER=host;DATABASE=db;Trusted_Connection=yes
         """
         return (
             f"DRIVER={{{self.db_driver}}};"
-            f"SERVER={self.db_server},{self.db_port};"
+            f"SERVER={self.db_server};"
             f"DATABASE={self.db_name};"
-            f"UID={self.db_user};"
-            f"PWD={self.db_password}"
+            f"Trusted_Connection=yes"
         )
 
     @property
