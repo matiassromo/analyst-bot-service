@@ -69,7 +69,3 @@ dmypy.json
 
 # Claude
 .claude/
-CLAUDE.md
-GETTING_STARTED.md
-README.md
-*.md
