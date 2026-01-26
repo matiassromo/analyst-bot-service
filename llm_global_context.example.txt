@@ -1,1 +1,0 @@
-When querying for the current date (today) in the DB instead of using GETDATE(), use GETDATE()+1

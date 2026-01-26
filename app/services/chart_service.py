@@ -203,7 +203,13 @@ class ChartService:
         # Limit to top 10 slices for readability
         if len(df) > 10:
             logger.warning(f"Pie chart has {len(df)} slices, limiting to top 10")
-            df = df.nlargest(10, config.x_column)
+            # Find numeric column for sorting (nlargest requires numeric dtype)
+            numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+            if numeric_cols:
+                df = df.nlargest(10, numeric_cols[0])
+            else:
+                # Fallback: just take first 10 rows if no numeric column found
+                df = df.head(10)
 
         # Create pie chart
         colors = sns.color_palette(config.color_palette, len(df))
