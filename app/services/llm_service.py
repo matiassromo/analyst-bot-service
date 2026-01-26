@@ -318,7 +318,10 @@ Respond with ONLY the JSON object, no additional text."""
         )
 
         if self.global_context:
+            print("There is global context")
             prompt += f"\n\nGlobal Context:\n{self.global_context}"
+        else:
+            print("There is no global context")
 
         if context.additional_context:
             prompt += f"\n\nAdditional Context: {context.additional_context}"
@@ -401,9 +404,25 @@ Respond with ONLY the JSON object, no additional text."""
             except json.JSONDecodeError as e:
                 logger.error(f"Failed to parse JSON: {e}")
                 logger.error(f"Response text: {cleaned_text[:500]}")
-                raise LLMParseError(
-                    f"Failed to parse LLM response as JSON: {e}"
-                )
+
+                recovered_text = self._extract_json_object(cleaned_text)
+                if recovered_text:
+                    sanitized_text = self._sanitize_json_string_literals(
+                        recovered_text
+                    )
+                    try:
+                        response_data = json.loads(sanitized_text)
+                    except json.JSONDecodeError as recovery_error:
+                        logger.error(
+                            f"Failed to parse sanitized JSON: {recovery_error}"
+                        )
+                        raise LLMParseError(
+                            f"Failed to parse LLM response as JSON: {e}"
+                        ) from recovery_error
+                else:
+                    raise LLMParseError(
+                        f"Failed to parse LLM response as JSON: {e}"
+                    )
 
             # Validate with Pydantic
             try:
@@ -423,6 +442,63 @@ Respond with ONLY the JSON object, no additional text."""
         except Exception as e:
             logger.error(f"Unexpected error parsing response: {e}")
             raise LLMParseError(f"Failed to parse response: {e}")
+
+    @staticmethod
+    def _extract_json_object(text: str) -> Optional[str]:
+        """
+        Extract a JSON object from a larger string.
+
+        Returns None if no object boundaries are found.
+        """
+        start = text.find("{")
+        end = text.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        return text[start:end + 1]
+
+    @staticmethod
+    def _sanitize_json_string_literals(text: str) -> str:
+        """
+        Escape raw control characters inside JSON string literals.
+
+        This makes LLM output with unescaped newlines parseable.
+        """
+        result = []
+        in_string = False
+        escape = False
+
+        for ch in text:
+            if in_string:
+                if escape:
+                    result.append(ch)
+                    escape = False
+                    continue
+                if ch == "\\":
+                    result.append(ch)
+                    escape = True
+                    continue
+                if ch == "\"":
+                    result.append(ch)
+                    in_string = False
+                    continue
+                if ch == "\r":
+                    result.append("\\r")
+                    continue
+                if ch == "\n":
+                    result.append("\\n")
+                    continue
+                if ch == "\t":
+                    result.append("\\t")
+                    continue
+                result.append(ch)
+            else:
+                if ch == "\"":
+                    result.append(ch)
+                    in_string = True
+                else:
+                    result.append(ch)
+
+        return "".join(result)
 
     async def generate_explanation_from_results(
         self,
