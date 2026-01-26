@@ -4,7 +4,7 @@ Loads configuration from environment variables with type validation.
 """
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from typing import List
+from typing import List, Literal, Optional
 
 
 class Settings(BaseSettings):
@@ -30,9 +30,10 @@ class Settings(BaseSettings):
     db_server: str
     db_port: int = 1433
     db_name: str
-    db_user: str
-    db_password: str
+    db_user: str = ""
+    db_password: str = ""
     db_driver: str = "ODBC Driver 17 for SQL Server"
+    db_auth_type: Literal["windows", "sql", "auto"] = "auto"
 
     # Google Gemini API
     gemini_api_key: str
@@ -60,18 +61,46 @@ class Settings(BaseSettings):
         return [ip.strip() for ip in self.allowed_ips.split(",") if ip.strip()]
 
     @property
+    def is_azure_sql(self) -> bool:
+        """Check if the server is an Azure SQL Database."""
+        return ".database.windows.net" in self.db_server.lower()
+
+    @property
     def db_connection_string(self) -> str:
         """
         Generate SQL Server connection string for pyodbc.
 
-        Format: DRIVER={driver};SERVER=host;DATABASE=db;Trusted_Connection=yes
+        Supports two authentication modes:
+        - Windows Auth: Trusted_Connection=yes (local SQL Server)
+        - SQL Auth: UID/PWD with encryption (Azure SQL or explicit SQL auth)
+
+        The auth mode is determined by db_auth_type:
+        - "windows": Always use Windows Authentication
+        - "sql": Always use SQL Authentication
+        - "auto": Use SQL Auth for Azure (*.database.windows.net), Windows Auth otherwise
         """
-        return (
+        base = (
             f"DRIVER={{{self.db_driver}}};"
             f"SERVER={self.db_server};"
             f"DATABASE={self.db_name};"
-            f"Trusted_Connection=yes"
         )
+
+        # Determine effective auth type
+        if self.db_auth_type == "auto":
+            use_sql_auth = self.is_azure_sql
+        else:
+            use_sql_auth = self.db_auth_type == "sql"
+
+        if use_sql_auth:
+            return (
+                base +
+                f"UID={self.db_user};"
+                f"PWD={self.db_password};"
+                f"Encrypt=yes;"
+                f"TrustServerCertificate=no;"
+            )
+        else:
+            return base + "Trusted_Connection=yes"
 
     @property
     def is_development(self) -> bool:
