@@ -1,0 +1,5 @@
+Use SQL Server syntax (TOP, GETDATE()).
+Prefer explicit JOINs with table aliases.
+Default to last 90 days when time range is unspecified.
+Use [dbo] schema unless otherwise noted.
+If a table name is ambiguous, prefer the Fact tables over raw logs.

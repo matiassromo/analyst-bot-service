@@ -38,6 +38,10 @@ class Settings(BaseSettings):
     gemini_api_key: str
     gemini_model: str = "gemini-1.5-pro"
 
+    # LLM Global Context
+    llm_global_context: str = ""
+    llm_global_context_path: str = ""
+
     # API Configuration
     api_v1_prefix: str = "/api/v1"
     max_query_rows: int = 10000

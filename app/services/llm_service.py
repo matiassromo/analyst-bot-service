@@ -5,6 +5,7 @@ Generates SQL queries and analysis from natural language prompts.
 
 import json
 import logging
+from pathlib import Path
 from typing import Optional
 from google import genai
 from google.genai import types
@@ -173,7 +174,12 @@ User Question: {prompt}
 
 Respond with ONLY the JSON object, no additional text."""
 
-    def __init__(self, api_key: str = None, model_name: str = None):
+    def __init__(
+        self,
+        api_key: str = None,
+        model_name: str = None,
+        global_context: Optional[str] = None
+    ):
         """
         Initialize LLM service.
 
@@ -183,6 +189,11 @@ Respond with ONLY the JSON object, no additional text."""
         """
         self.api_key = api_key or settings.gemini_api_key
         self.model_name = model_name or settings.gemini_model
+        self.global_context = (
+            global_context
+            if global_context is not None
+            else self._resolve_global_context()
+        )
 
         # Initialize Gemini client with API key
         self.client = genai.Client(api_key=self.api_key)
@@ -305,6 +316,9 @@ Respond with ONLY the JSON object, no additional text."""
             schema=context.database_schema,
             prompt=context.user_prompt
         )
+
+        if self.global_context:
+            prompt += f"\n\nGlobal Context:\n{self.global_context}"
 
         if context.additional_context:
             prompt += f"\n\nAdditional Context: {context.additional_context}"
@@ -434,6 +448,10 @@ Respond with ONLY the JSON object, no additional text."""
             # Limit results to first 50 rows for context (to avoid token limits)
             results_sample = query_results[:50]
 
+            global_context_block = ""
+            if self.global_context:
+                global_context_block = f"\n\nGlobal Context:\n{self.global_context}"
+
             # Build prompt for explanation generation
             explanation_prompt = f"""You are an expert data analyst. Given a user's question, the SQL query that was executed, and the actual results, provide a clear, concise explanation in Spanish that describes the RESULTS.
 
@@ -446,6 +464,7 @@ Query Results (first 50 rows):
 {json.dumps(results_sample, indent=2, ensure_ascii=False)}
 
 Total Rows Returned: {len(query_results)}
+{global_context_block}
 
 Provide a clear explanation in Spanish (2-5 sentences) that:
 1. Directly answers the user's question based on the results
@@ -490,3 +509,23 @@ Respond with ONLY the explanation text in Spanish, no JSON or additional formatt
         except Exception as e:
             logger.error(f"Gemini API connection test failed: {e}")
             return False
+
+    def _resolve_global_context(self) -> str:
+        """
+        Load global LLM context from settings.
+
+        Precedence:
+        1. LLM_GLOBAL_CONTEXT_PATH file contents
+        2. LLM_GLOBAL_CONTEXT inline value
+        """
+        context_path = settings.llm_global_context_path.strip()
+        if context_path:
+            path = Path(context_path)
+            try:
+                return path.read_text(encoding="utf-8").strip()
+            except Exception as e:
+                logger.warning(
+                    f"Failed to read LLM global context file '{context_path}': {e}"
+                )
+
+        return settings.llm_global_context.strip()
