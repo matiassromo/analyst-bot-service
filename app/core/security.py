@@ -8,7 +8,7 @@ import logging
 from typing import List
 from fastapi import Request, HTTPException, status
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
+from starlette.responses import Response, JSONResponse
 
 logger = logging.getLogger(__name__)
 
@@ -118,9 +118,9 @@ class IPWhitelistMiddleware(BaseHTTPMiddleware):
             logger.warning(
                 f"Access denied for IP {client_ip} to {request.url.path}"
             )
-            raise HTTPException(
+            return JSONResponse(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Access forbidden: IP {client_ip} is not whitelisted"
+                content={"detail": f"Access forbidden: IP {client_ip} is not whitelisted"}
             )
 
         logger.debug(f"Allowed IP {client_ip} accessing {request.url.path}")
