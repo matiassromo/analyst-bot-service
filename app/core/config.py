@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     db_name: str
     db_user: str = ""
     db_password: str = ""
-    db_driver: str = "ODBC Driver 17 for SQL Server"
+    db_driver: str = "ODBC Driver 18 for SQL Server"
     db_auth_type: Literal["windows", "sql", "auto"] = "auto"
 
     # Google Gemini API
