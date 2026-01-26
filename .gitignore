@@ -69,3 +69,5 @@ dmypy.json
 
 # Claude
 .claude/
+CLAUDE.md
+AGENTS.md
