@@ -74,6 +74,9 @@ QUERY RULES:
 - Each purpose must be in Spanish and describe what that specific query answers
 - Queries should be complementary - together they should fully answer the user's question
 - Order queries logically (main query first, supporting/comparison queries after)
+- JSON strings must be valid: do NOT include raw newlines inside string values
+  * If you need line breaks in sql_query, use \\n inside the string
+  * Ensure the JSON is complete and strictly valid
 
 Database Schema:
 {schema}
@@ -114,7 +117,8 @@ Respond with ONLY the JSON object, no additional text."""
             temperature=0.2,  # More deterministic
             top_p=0.95,
             top_k=40,
-            max_output_tokens=2048,
+            max_output_tokens=4096,
+            response_mime_type="application/json",
             safety_settings=[
                 types.SafetySetting(
                     category='HARM_CATEGORY_HARASSMENT',
