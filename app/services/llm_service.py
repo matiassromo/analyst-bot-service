@@ -6,13 +6,14 @@ Generates SQL queries and analysis from natural language prompts.
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from google import genai
 from google.genai import types
 
 from app.core.config import settings
 from app.models.llm_models import (
-    LLMAnalysisResponse,
+    LLMMultiQueryResponse,
+    QueryPlan,
     LLMPromptContext,
     LLMAPIError,
     LLMParseError,
@@ -25,152 +26,61 @@ logger = logging.getLogger(__name__)
 class LLMService:
     """
     Service for interacting with Google Gemini LLM.
-    Generates structured analysis responses from natural language prompts.
+    Generates multi-query analysis plans from natural language prompts.
     """
 
-    SYSTEM_PROMPT_WITH_CHARTS = """You are an expert SQL analyst for a business database. Given a database schema and a user question in Spanish, you must:
+    SYSTEM_PROMPT_MULTI_QUERY = """You are an expert SQL analyst for a business database. Given a database schema and a user question in Spanish, you must generate 1-5 SQL queries to comprehensively answer the question.
 
-1. Write a SQL Server query to answer the question
-2. Leave explanation empty (will be generated after query execution)
-3. Suggest appropriate chart visualizations
+Generate multiple queries when:
+- The question has multiple parts (e.g., "top products AND monthly trends")
+- Comparison data is needed (e.g., "this month vs last month")
+- Different perspectives add value (e.g., "sales by category AND by region")
+- Supporting context improves the answer
+
+Generate a single query when:
+- The question is straightforward
+- One query fully answers the question
 
 Respond ONLY with valid JSON matching this exact structure:
 {{
-  "sql_query": "SELECT TOP 10 p.Name as ProductName, SUM(s.Quantity) as TotalSales FROM Sales s JOIN Products p ON s.ProductId = p.Id GROUP BY p.Name ORDER BY TotalSales DESC",
-  "explanation": "",
-  "chart_configs": [
+  "queries": [
     {{
-      "type": "bar",
-      "title": "Top 10 Productos Más Vendidos",
-      "x_column": "ProductName",
-      "y_column": "TotalSales",
-      "x_label": "Producto",
-      "y_label": "Ventas Totales",
-      "color_palette": "viridis"
+      "query_id": "q1",
+      "purpose": "Obtener los productos mas vendidos",
+      "sql_query": "SELECT TOP 10 p.Name as ProductName, SUM(s.Quantity) as TotalSales FROM Sales s JOIN Products p ON s.ProductId = p.Id GROUP BY p.Name ORDER BY TotalSales DESC"
+    }},
+    {{
+      "query_id": "q2",
+      "purpose": "Comparar con el mes anterior",
+      "sql_query": "SELECT SUM(s.Quantity) as LastMonthSales FROM Sales s WHERE s.SaleDate >= DATEADD(month, -1, DATEADD(month, DATEDIFF(month, 0, GETDATE()), 0)) AND s.SaleDate < DATEADD(month, DATEDIFF(month, 0, GETDATE()), 0)"
     }}
   ]
 }}
 
 CRITICAL SQL RULES:
 - Use SQL Server syntax (TOP instead of LIMIT, GETDATE() instead of NOW())
-- Always include column aliases for aggregates (e.g., SUM(quantity) as total_sales)
+- Always include column aliases for aggregates (e.g., SUM(quantity) as TotalSales)
 - **GROUP BY RULE**: When using aggregate functions (SUM, COUNT, AVG, MAX, MIN), ALL non-aggregated columns in SELECT must be in GROUP BY
-  * CORRECT: SELECT ProductName, SUM(Quantity) as total FROM Sales GROUP BY ProductName
-  * WRONG: SELECT ProductName, CategoryName, SUM(Quantity) as total FROM Sales GROUP BY ProductName
-  * CORRECT: SELECT ProductName, CategoryName, SUM(Quantity) as total FROM Sales GROUP BY ProductName, CategoryName
+  * CORRECT: SELECT ProductName, SUM(Quantity) as Total FROM Sales GROUP BY ProductName
+  * WRONG: SELECT ProductName, CategoryName, SUM(Quantity) as Total FROM Sales GROUP BY ProductName
+  * CORRECT: SELECT ProductName, CategoryName, SUM(Quantity) as Total FROM Sales GROUP BY ProductName, CategoryName
 - Entity Framework databases use PascalCase column names (e.g., ProductId, CategoryName, CreatedDate)
 - When joining tables, always use aliases to avoid ambiguous column references
-  * Example: SELECT p.Name, SUM(s.Quantity) as total FROM Sales s JOIN Products p ON s.ProductId = p.ProductId GROUP BY p.Name
-- Explanation must be in Spanish, clear and concise
+  * Example: SELECT p.Name, SUM(s.Quantity) as Total FROM Sales s JOIN Products p ON s.ProductId = p.ProductId GROUP BY p.Name
 
-CHART RULES:
-- Maximum 3 charts per analysis
-- Choose chart types appropriate for the data:
-  * bar: categorical comparisons (products, categories, regions)
-  * line: trends over time (daily/monthly sales, growth)
-  * pie: proportions/percentages (market share, distribution)
-  * scatter: correlation between two numeric variables
-  * heatmap: matrix data (region x month, product x category)
-- For pie charts, y_column is not needed
-- Use descriptive Spanish titles for charts
-- Ensure column names in chart_configs match the SELECT query aliases EXACTLY
+QUERY RULES:
+- Generate 1-5 queries maximum
+- Each query must have a unique query_id (q1, q2, q3, etc.)
+- Each purpose must be in Spanish and describe what that specific query answers
+- Queries should be complementary - together they should fully answer the user's question
+- Order queries logically (main query first, supporting/comparison queries after)
 
 Database Schema:
 {schema}
 
 User Question: {prompt}
 
-Respond with ONLY the JSON object, no additional text."""
-
-    SYSTEM_PROMPT_WITHOUT_CHARTS = """You are an expert SQL analyst for a business database. Given a database schema and a user question in Spanish, you must:
-
-1. Write a SQL Server query to answer the question
-2. Leave explanation empty (will be generated after query execution)
-3. Do NOT generate any chart visualizations
-
-Respond ONLY with valid JSON matching this exact structure:
-{{
-  "sql_query": "SELECT TOP 10 p.Name as ProductName, SUM(s.Quantity) as TotalSales FROM Sales s JOIN Products p ON s.ProductId = p.Id GROUP BY p.Name ORDER BY TotalSales DESC",
-  "explanation": "",
-  "chart_configs": []
-}}
-
-CRITICAL SQL RULES:
-- Use SQL Server syntax (TOP instead of LIMIT, GETDATE() instead of NOW())
-- Always include column aliases for aggregates (e.g., SUM(quantity) as total_sales)
-- **GROUP BY RULE**: When using aggregate functions (SUM, COUNT, AVG, MAX, MIN), ALL non-aggregated columns in SELECT must be in GROUP BY
-  * CORRECT: SELECT ProductName, SUM(Quantity) as total FROM Sales GROUP BY ProductName
-  * WRONG: SELECT ProductName, CategoryName, SUM(Quantity) as total FROM Sales GROUP BY ProductName
-  * CORRECT: SELECT ProductName, CategoryName, SUM(Quantity) as total FROM Sales GROUP BY ProductName, CategoryName
-- Entity Framework databases use PascalCase column names (e.g., ProductId, CategoryName, CreatedDate)
-- When joining tables, always use aliases to avoid ambiguous column references
-  * Example: SELECT p.Name, SUM(s.Quantity) as total FROM Sales s JOIN Products p ON s.ProductId = p.ProductId GROUP BY p.Name
-- Explanation must be in Spanish, clear and concise
-- Do NOT include any charts - the chart_configs array must be empty: []
-- Focus on providing a detailed textual explanation since no visualizations will be provided
-
-Database Schema:
-{schema}
-
-User Question: {prompt}
-
-Respond with ONLY the JSON object, no additional text."""
-
-    SYSTEM_PROMPT_AUTO_CHARTS = """You are an expert SQL analyst for a business database. Given a database schema and a user question in Spanish, you must:
-
-1. Write a SQL Server query to answer the question
-2. Leave explanation empty (will be generated after query execution)
-3. Decide whether chart visualizations would be helpful for understanding the data
-4. Only suggest charts if they add significant value to the analysis
-
-Respond ONLY with valid JSON matching this exact structure:
-{{
-  "sql_query": "SELECT TOP 10 p.Name as ProductName, SUM(s.Quantity) as TotalSales FROM Sales s JOIN Products p ON s.ProductId = p.Id GROUP BY p.Name ORDER BY TotalSales DESC",
-  "explanation": "",
-  "chart_configs": [
-    {{
-      "type": "bar",
-      "title": "Top 10 Productos Más Vendidos",
-      "x_column": "ProductName",
-      "y_column": "TotalSales",
-      "x_label": "Producto",
-      "y_label": "Ventas Totales",
-      "color_palette": "viridis"
-    }}
-  ]
-}}
-
-CRITICAL SQL RULES:
-- Use SQL Server syntax (TOP instead of LIMIT, GETDATE() instead of NOW())
-- Always include column aliases for aggregates (e.g., SUM(quantity) as total_sales)
-- **GROUP BY RULE**: When using aggregate functions (SUM, COUNT, AVG, MAX, MIN), ALL non-aggregated columns in SELECT must be in GROUP BY
-  * CORRECT: SELECT ProductName, SUM(Quantity) as total FROM Sales GROUP BY ProductName
-  * WRONG: SELECT ProductName, CategoryName, SUM(Quantity) as total FROM Sales GROUP BY ProductName
-  * CORRECT: SELECT ProductName, CategoryName, SUM(Quantity) as total FROM Sales GROUP BY ProductName, CategoryName
-- Entity Framework databases use PascalCase column names (e.g., ProductId, CategoryName, CreatedDate)
-- When joining tables, always use aliases to avoid ambiguous column references
-  * Example: SELECT p.Name, SUM(s.Quantity) as total FROM Sales s JOIN Products p ON s.ProductId = p.ProductId GROUP BY p.Name
-- Explanation must be in Spanish, clear and concise
-
-CHART RULES:
-- Only suggest charts when they genuinely help understand the data:
-  * YES: Comparisons, trends, distributions, correlations
-  * NO: Simple counts, single values, yes/no answers, basic lookups
-- Maximum 3 charts per analysis (or use empty array [] if charts aren't needed)
-- Choose chart types appropriate for the data:
-  * bar: categorical comparisons (products, categories, regions)
-  * line: trends over time (daily/monthly sales, growth)
-  * pie: proportions/percentages (market share, distribution)
-  * scatter: correlation between two numeric variables
-  * heatmap: matrix data (region x month, product x category)
-- For pie charts, y_column is not needed
-- Use descriptive Spanish titles for charts
-- Ensure column names in chart_configs match the SELECT query aliases EXACTLY
-
-Database Schema:
-{schema}
-
-User Question: {prompt}
+Maximum queries allowed: {max_queries}
 
 Respond with ONLY the JSON object, no additional text."""
 
@@ -186,6 +96,7 @@ Respond with ONLY the JSON object, no additional text."""
         Args:
             api_key: Gemini API key (uses settings if not provided)
             model_name: Gemini model name (uses settings if not provided)
+            global_context: Optional global context for prompts
         """
         self.api_key = api_key or settings.gemini_api_key
         self.model_name = model_name or settings.gemini_model
@@ -226,24 +137,24 @@ Respond with ONLY the JSON object, no additional text."""
 
         logger.info(f"LLM service initialized with model: {self.model_name}")
 
-    async def generate_analysis(
+    async def generate_multi_query_plan(
         self,
         user_prompt: str,
         database_schema: str,
-        additional_context: Optional[str] = None,
-        generate_charts: Optional[bool] = None
-    ) -> LLMAnalysisResponse:
+        max_queries: int = 5,
+        additional_context: Optional[str] = None
+    ) -> LLMMultiQueryResponse:
         """
-        Generate SQL query and analysis from natural language prompt.
+        Generate a multi-query plan from natural language prompt.
 
         Args:
             user_prompt: User's question in Spanish
             database_schema: Formatted database schema
+            max_queries: Maximum number of queries to generate (1-5)
             additional_context: Optional additional context
-            generate_charts: Whether to generate charts (None=auto, True=always, False=never)
 
         Returns:
-            Structured LLM response with query, explanation, and chart configs
+            Structured LLM response with query plan
 
         Raises:
             LLMAPIError: If API call fails
@@ -259,25 +170,25 @@ Respond with ONLY the JSON object, no additional text."""
             )
 
             # Generate prompt
-            prompt = self._build_prompt(context, generate_charts)
+            prompt = self._build_multi_query_prompt(context, max_queries)
 
             logger.info(
-                f"Generating analysis for prompt: {user_prompt[:100]}... "
-                f"(charts: {generate_charts})"
+                f"Generating multi-query plan for prompt: {user_prompt[:100]}... "
+                f"(max_queries: {max_queries})"
             )
 
             # Call Gemini API
             response = await self._call_gemini_api(prompt)
 
             # Parse and validate response
-            analysis_response = self._parse_response(response)
+            multi_query_response = self._parse_multi_query_response(response)
 
             logger.info(
-                f"Analysis generated successfully. "
-                f"Query: {analysis_response.sql_query[:100]}..."
+                f"Multi-query plan generated successfully. "
+                f"Queries: {len(multi_query_response.queries)}"
             )
 
-            return analysis_response
+            return multi_query_response
 
         except LLMAPIError:
             raise
@@ -286,42 +197,32 @@ Respond with ONLY the JSON object, no additional text."""
         except LLMValidationError:
             raise
         except Exception as e:
-            logger.error(f"Unexpected error in generate_analysis: {e}")
-            raise LLMAPIError(f"Failed to generate analysis: {e}")
+            logger.error(f"Unexpected error in generate_multi_query_plan: {e}")
+            raise LLMAPIError(f"Failed to generate query plan: {e}")
 
-    def _build_prompt(
+    def _build_multi_query_prompt(
         self,
         context: LLMPromptContext,
-        generate_charts: Optional[bool] = None
+        max_queries: int
     ) -> str:
         """
-        Build complete prompt for Gemini.
+        Build complete prompt for multi-query generation.
 
         Args:
             context: Prompt context with schema and user question
-            generate_charts: Whether to generate charts (None=auto, True=always, False=never)
+            max_queries: Maximum number of queries to generate
 
         Returns:
             Formatted prompt string
         """
-        # Select appropriate template based on chart generation preference
-        if generate_charts is True:
-            template = self.SYSTEM_PROMPT_WITH_CHARTS
-        elif generate_charts is False:
-            template = self.SYSTEM_PROMPT_WITHOUT_CHARTS
-        else:  # None - let LLM decide
-            template = self.SYSTEM_PROMPT_AUTO_CHARTS
-
-        prompt = template.format(
+        prompt = self.SYSTEM_PROMPT_MULTI_QUERY.format(
             schema=context.database_schema,
-            prompt=context.user_prompt
+            prompt=context.user_prompt,
+            max_queries=max_queries
         )
 
         if self.global_context:
-            print("There is global context")
             prompt += f"\n\nGlobal Context:\n{self.global_context}"
-        else:
-            print("There is no global context")
 
         if context.additional_context:
             prompt += f"\n\nAdditional Context: {context.additional_context}"
@@ -373,15 +274,15 @@ Respond with ONLY the JSON object, no additional text."""
 
         raise LLMAPIError("Failed to call Gemini API after retries")
 
-    def _parse_response(self, response_text: str) -> LLMAnalysisResponse:
+    def _parse_multi_query_response(self, response_text: str) -> LLMMultiQueryResponse:
         """
-        Parse and validate LLM response.
+        Parse and validate LLM response for multi-query plan.
 
         Args:
             response_text: Raw response text from Gemini
 
         Returns:
-            Validated LLMAnalysisResponse object
+            Validated LLMMultiQueryResponse object
 
         Raises:
             LLMParseError: If response cannot be parsed as JSON
@@ -426,8 +327,8 @@ Respond with ONLY the JSON object, no additional text."""
 
             # Validate with Pydantic
             try:
-                analysis_response = LLMAnalysisResponse(**response_data)
-                return analysis_response
+                multi_query_response = LLMMultiQueryResponse(**response_data)
+                return multi_query_response
             except Exception as e:
                 logger.error(f"Response validation failed: {e}")
                 logger.error(f"Response data: {response_data}")
@@ -500,72 +401,83 @@ Respond with ONLY the JSON object, no additional text."""
 
         return "".join(result)
 
-    async def generate_explanation_from_results(
+    async def generate_unified_analysis(
         self,
         user_prompt: str,
-        sql_query: str,
-        query_results: list
+        query_results: List[Dict[str, Any]]
     ) -> str:
         """
-        Generate explanation based on actual query results.
+        Generate unified analysis based on all query results.
 
         Args:
             user_prompt: Original user question in Spanish
-            sql_query: The executed SQL query
-            query_results: List of result rows (dicts)
+            query_results: List of query results with their data
 
         Returns:
-            Explanation text in Spanish describing the results
+            Unified analysis text in Spanish synthesizing all results
 
         Raises:
             LLMAPIError: If API call fails
         """
         try:
-            # Limit results to first 50 rows for context (to avoid token limits)
-            results_sample = query_results[:50]
+            # Format query results for the prompt
+            results_text = ""
+            for result in query_results:
+                query_id = result.get("query_id", "unknown")
+                purpose = result.get("purpose", "")
+                data = result.get("data", [])
+                error = result.get("error")
+                row_count = result.get("row_count", 0)
+
+                results_text += f"\n--- Query {query_id}: {purpose} ---\n"
+                if error:
+                    results_text += f"Error: {error}\n"
+                else:
+                    # Limit data to first 30 rows for context
+                    sample_data = data[:30]
+                    results_text += f"Rows returned: {row_count}\n"
+                    results_text += f"Data (first 30 rows):\n{json.dumps(sample_data, indent=2, ensure_ascii=False)}\n"
 
             global_context_block = ""
             if self.global_context:
                 global_context_block = f"\n\nGlobal Context:\n{self.global_context}"
 
-            # Build prompt for explanation generation
-            explanation_prompt = f"""You are an expert data analyst. Given a user's question, the SQL query that was executed, and the actual results, provide a clear, concise explanation in Spanish that describes the RESULTS.
+            # Build prompt for unified analysis
+            analysis_prompt = f"""You are an expert data analyst. Given a user's question and the results from multiple SQL queries, provide a unified analysis in Spanish that synthesizes all the data.
 
 User Question: {user_prompt}
 
-SQL Query Executed:
-{sql_query}
-
-Query Results (first 50 rows):
-{json.dumps(results_sample, indent=2, ensure_ascii=False)}
-
-Total Rows Returned: {len(query_results)}
+Query Results:
+{results_text}
 {global_context_block}
 
-Provide a clear explanation in Spanish (2-5 sentences) that:
-1. Directly answers the user's question based on the results
-2. Highlights key findings and patterns in the data
+Provide a comprehensive analysis in Spanish (3-8 sentences) that:
+1. Directly answers the user's question by synthesizing data from ALL successful queries
+2. Highlights key findings, comparisons, and patterns across the data
 3. Uses specific numbers and values from the results
-4. Is written in a professional but accessible tone
+4. If some queries failed, acknowledge this but focus on available data
+5. Is written in a professional but accessible tone
 
-Respond with ONLY the explanation text in Spanish, no JSON or additional formatting."""
+Respond with ONLY the analysis text in Spanish, no JSON or additional formatting."""
 
-            logger.info(f"Generating explanation from {len(query_results)} result rows...")
+            logger.info(f"Generating unified analysis from {len(query_results)} query results...")
 
             # Call Gemini API
-            response = await self._call_gemini_api(explanation_prompt)
+            response = await self._call_gemini_api(analysis_prompt)
 
-            # Clean and return explanation
-            explanation = response.strip()
+            # Clean and return analysis
+            analysis = response.strip()
 
-            logger.info(f"Generated explanation: {explanation[:100]}...")
+            logger.info(f"Generated unified analysis: {analysis[:100]}...")
 
-            return explanation
+            return analysis
 
         except Exception as e:
-            logger.error(f"Failed to generate explanation from results: {e}")
-            # Return a basic fallback explanation
-            return f"Se ejecutó la consulta exitosamente y se obtuvieron {len(query_results)} resultados."
+            logger.error(f"Failed to generate unified analysis: {e}")
+            # Return a basic fallback analysis
+            successful = sum(1 for r in query_results if not r.get("error"))
+            total_rows = sum(r.get("row_count", 0) for r in query_results if not r.get("error"))
+            return f"Se ejecutaron {successful} consultas exitosamente con un total de {total_rows} registros."
 
     def test_connection(self) -> bool:
         """

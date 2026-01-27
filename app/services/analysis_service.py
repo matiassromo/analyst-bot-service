@@ -1,18 +1,19 @@
 """
-Analysis service - Main orchestrator for the analysis workflow.
-Coordinates LLM, database, and chart generation services.
+Analysis service - Main orchestrator for the multi-query analysis workflow.
+Coordinates LLM, database services for comprehensive data analysis.
 """
 
 import logging
+import time
 from typing import List, Dict, Any
 
 from app.services.llm_service import LLMService, LLMAPIError, LLMParseError
-from app.services.chart_service import ChartService, ChartGenerationError
 from app.repositories.database_repository import (
     DatabaseRepository,
     DatabaseConnectionError
 )
 from app.utils.query_validator import QueryValidator, QueryValidationError
+from app.models.llm_models import QueryPlan
 
 logger = logging.getLogger(__name__)
 
@@ -24,21 +25,19 @@ class AnalysisError(Exception):
 
 class AnalysisService:
     """
-    Main service orchestrator for data analysis workflow.
+    Main service orchestrator for multi-query data analysis workflow.
 
     Workflow:
     1. Get database schema
-    2. Call LLM to generate SQL query and chart configs
-    3. Validate SQL query
-    4. Execute query against database
-    5. Generate charts from results
-    6. Return structured response
+    2. Call LLM to generate multi-query plan (1-5 queries)
+    3. Validate and execute each query
+    4. Generate unified analysis from all results
+    5. Return structured response with all query results and analysis
     """
 
     def __init__(
         self,
         llm_service: LLMService,
-        chart_service: ChartService,
         db_repository: DatabaseRepository,
         query_validator: QueryValidator = None
     ):
@@ -47,12 +46,10 @@ class AnalysisService:
 
         Args:
             llm_service: LLM service for query generation
-            chart_service: Chart service for visualization
             db_repository: Database repository for query execution
             query_validator: Query validator (optional, creates new if not provided)
         """
         self.llm_service = llm_service
-        self.chart_service = chart_service
         self.db_repository = db_repository
         self.query_validator = query_validator or QueryValidator()
 
@@ -62,27 +59,29 @@ class AnalysisService:
         self,
         user_prompt: str,
         exclude_tables: List[str] = None,
-        generate_charts: bool = None
+        max_queries: int = 5
     ) -> Dict[str, Any]:
         """
-        Perform complete analysis workflow.
+        Perform complete multi-query analysis workflow.
 
         Args:
             user_prompt: User's question in Spanish
             exclude_tables: Tables to exclude from schema (optional)
-            generate_charts: Whether to generate charts (None=auto, True=always, False=never)
+            max_queries: Maximum number of queries to generate (1-5)
 
         Returns:
             Dictionary with:
-            - explanation: Analysis explanation in Spanish
-            - sql_query: Executed SQL query
-            - charts: List of generated charts with base64 images
+            - analysis: Unified analysis text in Spanish
+            - queries: List of query results
+            - metadata: Execution metadata
 
         Raises:
-            AnalysisError: If any step in the workflow fails
+            AnalysisError: If any critical step in the workflow fails
         """
+        start_time = time.time()
+
         try:
-            logger.info(f"Starting analysis for prompt: {user_prompt[:100]}...")
+            logger.info(f"Starting multi-query analysis for prompt: {user_prompt[:100]}...")
 
             # Step 1: Get database schema
             logger.info("Step 1: Loading database schema...")
@@ -93,122 +92,79 @@ class AnalysisService:
                 logger.error(f"Failed to load schema: {e}")
                 raise AnalysisError(
                     "No se pudo conectar a la base de datos. "
-                    "Por favor, verifica la configuración."
+                    "Por favor, verifica la configuracion."
                 ) from e
 
-            # Step 2: Call LLM for analysis
-            logger.info("Step 2: Generating analysis with LLM...")
+            # Step 2: Call LLM for multi-query plan
+            logger.info("Step 2: Generating multi-query plan with LLM...")
             try:
-                llm_response = await self.llm_service.generate_analysis(
+                llm_response = await self.llm_service.generate_multi_query_plan(
                     user_prompt=user_prompt,
                     database_schema=schema,
-                    generate_charts=generate_charts
+                    max_queries=max_queries
                 )
-                logger.info(f"LLM generated query: {llm_response.sql_query[:100]}...")
-                logger.info(f"LLM generated {len(llm_response.chart_configs)} chart configs")
+                logger.info(f"LLM generated {len(llm_response.queries)} queries")
             except (LLMAPIError, LLMParseError) as e:
                 logger.error(f"LLM generation failed: {e}")
                 raise AnalysisError(
-                    "No se pudo generar el análisis. "
+                    "No se pudo generar el plan de analisis. "
                     "Por favor, intenta reformular tu pregunta."
                 ) from e
 
-            # Step 3: Validate SQL query
-            logger.info("Step 3: Validating SQL query...")
-            try:
-                self.query_validator.validate(llm_response.sql_query)
-                sanitized_query = self.query_validator.sanitize_query(
-                    llm_response.sql_query
-                )
-                logger.info("Query validation successful")
-            except QueryValidationError as e:
-                logger.error(f"Query validation failed: {e}")
+            # Step 3: Execute all queries
+            logger.info("Step 3: Executing queries...")
+            query_results = []
+            for query_plan in llm_response.queries:
+                result = await self._execute_single_query(query_plan)
+                query_results.append(result)
+
+            # Calculate statistics
+            successful_queries = sum(1 for r in query_results if r["error"] is None)
+            total_rows = sum(r["row_count"] for r in query_results if r["error"] is None)
+
+            logger.info(
+                f"Query execution complete: {successful_queries}/{len(query_results)} successful, "
+                f"{total_rows} total rows"
+            )
+
+            # Check if all queries failed
+            if successful_queries == 0:
+                logger.error("All queries failed")
                 raise AnalysisError(
-                    f"La consulta generada no es segura: {str(e)}"
-                ) from e
-
-            # Step 4: Execute query
-            logger.info("Step 4: Executing query against database...")
-            try:
-                query_results = self.db_repository.execute_query(
-                    sanitized_query,
-                    validate=False  # Already validated
+                    "No se pudo ejecutar ninguna consulta exitosamente. "
+                    "Por favor, intenta reformular tu pregunta."
                 )
-                logger.info(f"Query executed successfully: {len(query_results)} rows returned")
 
-                # Check if we got results
-                if not query_results:
-                    logger.warning("Query returned no results")
-                    return {
-                        "explanation": "La consulta no retornó ningún resultado. Intenta reformular tu pregunta o verifica los filtros aplicados.",
-                        "sql_query": sanitized_query,
-                        "charts": []
-                    }
-
-            except DatabaseConnectionError as e:
-                logger.error(f"Query execution failed: {e}")
-                raise AnalysisError(
-                    f"Error al ejecutar la consulta: {str(e)}"
-                ) from e
-
-            # Step 4.5: Generate explanation from actual results
-            logger.info("Step 4.5: Generating explanation from query results...")
+            # Step 4: Generate unified analysis
+            logger.info("Step 4: Generating unified analysis...")
             try:
-                explanation = await self.llm_service.generate_explanation_from_results(
+                analysis = await self.llm_service.generate_unified_analysis(
                     user_prompt=user_prompt,
-                    sql_query=sanitized_query,
                     query_results=query_results
                 )
-                logger.info("Explanation generated successfully")
+                logger.info("Unified analysis generated successfully")
             except Exception as e:
-                logger.error(f"Failed to generate explanation: {e}")
-                # Fallback to a simple explanation
-                explanation = f"Se encontraron {len(query_results)} registros que responden a tu consulta."
+                logger.error(f"Failed to generate unified analysis: {e}")
+                # Fallback to a simple analysis
+                analysis = f"Se ejecutaron {successful_queries} consultas exitosamente con un total de {total_rows} registros."
 
-            # Step 5: Generate charts
-            logger.info("Step 5: Generating charts...")
-            charts = []
+            # Step 5: Calculate execution time and return
+            execution_time_ms = int((time.time() - start_time) * 1000)
 
-            for i, chart_config in enumerate(llm_response.chart_configs):
-                try:
-                    logger.info(
-                        f"Generating chart {i+1}/{len(llm_response.chart_configs)}: "
-                        f"{chart_config.type} - {chart_config.title}"
-                    )
-
-                    image_base64 = self.chart_service.generate_chart(
-                        data=query_results,
-                        config=chart_config
-                    )
-
-                    charts.append({
-                        "type": chart_config.type,
-                        "title": chart_config.title,
-                        "image_base64": image_base64
-                    })
-
-                    logger.info(f"Chart {i+1} generated successfully")
-
-                except ChartGenerationError as e:
-                    logger.error(
-                        f"Failed to generate chart '{chart_config.title}': {e}"
-                    )
-                    # Continue with other charts instead of failing completely
-                    continue
-
-            if not charts:
-                logger.warning("No charts were generated")
-
-            # Step 6: Return structured response
             logger.info(
-                f"Analysis complete: {len(query_results)} rows, "
-                f"{len(charts)} charts generated"
+                f"Analysis complete: {len(query_results)} queries, "
+                f"{successful_queries} successful, {execution_time_ms}ms"
             )
 
             return {
-                "explanation": explanation,
-                "sql_query": sanitized_query,
-                "charts": charts
+                "analysis": analysis,
+                "queries": query_results,
+                "metadata": {
+                    "total_queries": len(query_results),
+                    "successful_queries": successful_queries,
+                    "total_rows": total_rows,
+                    "execution_time_ms": execution_time_ms
+                }
             }
 
         except AnalysisError:
@@ -216,9 +172,60 @@ class AnalysisService:
         except Exception as e:
             logger.exception(f"Unexpected error during analysis: {e}")
             raise AnalysisError(
-                "Ocurrió un error inesperado durante el análisis. "
+                "Ocurrio un error inesperado durante el analisis. "
                 "Por favor, intenta nuevamente."
             ) from e
+
+    async def _execute_single_query(self, query_plan: QueryPlan) -> Dict[str, Any]:
+        """
+        Execute a single query with validation and error handling.
+
+        Args:
+            query_plan: The query plan to execute
+
+        Returns:
+            Dictionary with query result or error
+        """
+        result = {
+            "query_id": query_plan.query_id,
+            "purpose": query_plan.purpose,
+            "sql_query": query_plan.sql_query,
+            "data": [],
+            "row_count": 0,
+            "error": None
+        }
+
+        try:
+            # Validate query
+            logger.info(f"Validating query {query_plan.query_id}...")
+            self.query_validator.validate(query_plan.sql_query)
+            sanitized_query = self.query_validator.sanitize_query(query_plan.sql_query)
+            result["sql_query"] = sanitized_query
+
+            # Execute query
+            logger.info(f"Executing query {query_plan.query_id}: {sanitized_query[:80]}...")
+            query_data = self.db_repository.execute_query(
+                sanitized_query,
+                validate=False  # Already validated
+            )
+
+            result["data"] = query_data
+            result["row_count"] = len(query_data)
+            logger.info(f"Query {query_plan.query_id} returned {len(query_data)} rows")
+
+        except QueryValidationError as e:
+            logger.error(f"Query {query_plan.query_id} validation failed: {e}")
+            result["error"] = f"Consulta no segura: {str(e)}"
+
+        except DatabaseConnectionError as e:
+            logger.error(f"Query {query_plan.query_id} execution failed: {e}")
+            result["error"] = f"Error de base de datos: {str(e)}"
+
+        except Exception as e:
+            logger.error(f"Query {query_plan.query_id} failed unexpectedly: {e}")
+            result["error"] = f"Error inesperado: {str(e)}"
+
+        return result
 
     async def validate_prompt(self, user_prompt: str) -> Dict[str, Any]:
         """
@@ -245,7 +252,7 @@ class AnalysisService:
 
         return {
             "valid": True,
-            "message": "Prompt válido"
+            "message": "Prompt valido"
         }
 
     def test_services(self) -> Dict[str, bool]:
@@ -271,9 +278,6 @@ class AnalysisService:
         except Exception as e:
             logger.error(f"LLM test failed: {e}")
             results["llm"] = False
-
-        # Chart service is always available (no external dependency)
-        results["chart"] = True
 
         return results
 

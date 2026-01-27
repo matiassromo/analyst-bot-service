@@ -9,7 +9,6 @@ from functools import lru_cache
 from app.core.config import settings
 from app.services.analysis_service import AnalysisService
 from app.services.llm_service import LLMService
-from app.services.chart_service import ChartService
 from app.repositories.database_repository import DatabaseRepository
 from app.utils.query_validator import QueryValidator
 
@@ -19,7 +18,6 @@ logger = logging.getLogger(__name__)
 # Singleton instances (created once per application lifecycle)
 _db_repository: DatabaseRepository = None
 _llm_service: LLMService = None
-_chart_service: ChartService = None
 _query_validator: QueryValidator = None
 
 
@@ -61,22 +59,6 @@ def get_llm_service() -> LLMService:
     return _llm_service
 
 
-def get_chart_service() -> ChartService:
-    """
-    Get chart service instance (singleton).
-
-    Returns:
-        ChartService instance
-    """
-    global _chart_service
-
-    if _chart_service is None:
-        logger.info("Initializing chart service...")
-        _chart_service = ChartService()
-
-    return _chart_service
-
-
 def get_query_validator() -> QueryValidator:
     """
     Get query validator instance (singleton).
@@ -103,7 +85,6 @@ def get_analysis_service() -> AnalysisService:
     """
     return AnalysisService(
         llm_service=get_llm_service(),
-        chart_service=get_chart_service(),
         db_repository=get_db_repository(),
         query_validator=get_query_validator()
     )
@@ -114,13 +95,12 @@ def reset_dependencies():
     Reset all dependency singletons.
     Useful for testing or reloading configuration.
     """
-    global _db_repository, _llm_service, _chart_service, _query_validator
+    global _db_repository, _llm_service, _query_validator
 
     logger.info("Resetting all dependency singletons...")
 
     _db_repository = None
     _llm_service = None
-    _chart_service = None
     _query_validator = None
 
     logger.info("Dependencies reset complete")

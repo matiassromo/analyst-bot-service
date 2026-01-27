@@ -1,6 +1,6 @@
 """
 Analysis API routes.
-Endpoints for data analysis, health checks, and database info.
+Endpoints for multi-query data analysis, health checks, and database info.
 """
 
 import logging
@@ -8,7 +8,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.models.requests import AnalysisRequest, HealthCheckRequest
 from app.models.responses import (
-    AnalysisResponse,
+    MultiQueryAnalysisResponse,
+    QueryResult,
+    AnalysisMetadata,
     HealthCheckResponse,
     DatabaseInfoResponse,
     ErrorResponse,
@@ -25,59 +27,68 @@ router = APIRouter()
 
 @router.post(
     "/analysis",
-    response_model=AnalysisResponse,
+    response_model=MultiQueryAnalysisResponse,
     responses={
         400: {"model": ErrorResponse, "description": "Invalid request or query validation failed"},
         500: {"model": ErrorResponse, "description": "Analysis failed"},
         502: {"model": ErrorResponse, "description": "LLM API error"},
         503: {"model": ErrorResponse, "description": "Database connection error"}
     },
-    summary="Analyze business data",
+    summary="Analyze business data with multiple queries",
     description=(
         "Analyze business data using natural language prompts. "
-        "Generates SQL queries, executes them, and creates visualizations."
+        "Generates 1-5 SQL queries to comprehensively answer the question, "
+        "executes them, and returns a unified analysis."
     )
 )
 async def analyze_data(
     request: AnalysisRequest,
     analysis_service: AnalysisService = Depends(get_analysis_service)
-) -> AnalysisResponse:
+) -> MultiQueryAnalysisResponse:
     """
     Analyze business data using a natural language prompt.
 
     **Process:**
     1. Loads database schema
-    2. Uses LLM to generate SQL query and chart configurations
-    3. Validates and executes the query
-    4. Generates charts from results
-    5. Returns explanation and visualizations
+    2. Uses LLM to generate 1-5 SQL queries
+    3. Validates and executes each query
+    4. Generates unified analysis from all results
+    5. Returns analysis text and all query results
 
     **Example Request:**
     ```json
     {
-      "prompt": "¿Cuál es el producto más vendido de la semana?",
+      "prompt": "Cuales son los productos mas vendidos y como se comparan con el mes pasado?",
       "exclude_tables": null,
-      "generate_charts": null
+      "max_queries": 5
     }
     ```
 
     **Parameters:**
     - `prompt`: Your question in Spanish
     - `exclude_tables`: Optional list of tables to exclude from analysis
-    - `generate_charts`: Optional (null=auto, true=always, false=never)
+    - `max_queries`: Maximum queries to generate (1-5, default 5)
 
     **Example Response:**
     ```json
     {
-      "explanation": "El producto más vendido...",
-      "sql_query": "SELECT TOP 10 ...",
-      "charts": [
+      "analysis": "El producto mas vendido es Widget A con 125 unidades...",
+      "queries": [
         {
-          "type": "bar",
-          "title": "Top Productos",
-          "image_base64": "iVBORw0KGgo..."
+          "query_id": "q1",
+          "purpose": "Obtener los productos mas vendidos",
+          "sql_query": "SELECT TOP 10 ...",
+          "data": [{"Name": "Widget A", "TotalSales": 125}],
+          "row_count": 10,
+          "error": null
         }
-      ]
+      ],
+      "metadata": {
+        "total_queries": 2,
+        "successful_queries": 2,
+        "total_rows": 11,
+        "execution_time_ms": 245
+      }
     }
     ```
     """
@@ -88,12 +99,17 @@ async def analyze_data(
         result = await analysis_service.analyze(
             user_prompt=request.prompt,
             exclude_tables=request.exclude_tables,
-            generate_charts=request.generate_charts
+            max_queries=request.max_queries
         )
 
         logger.info("Analysis completed successfully")
 
-        return AnalysisResponse(**result)
+        # Build response
+        return MultiQueryAnalysisResponse(
+            analysis=result["analysis"],
+            queries=[QueryResult(**q) for q in result["queries"]],
+            metadata=AnalysisMetadata(**result["metadata"])
+        )
 
     except AnalysisError as e:
         logger.error(f"Analysis error: {e}")
@@ -171,7 +187,7 @@ async def get_database_info(
         if "error" in info:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"No se pudo obtener información de la base de datos: {info['error']}"
+                detail=f"No se pudo obtener informacion de la base de datos: {info['error']}"
             )
 
         return DatabaseInfoResponse(**info)
@@ -182,7 +198,7 @@ async def get_database_info(
         logger.error(f"Failed to get database info: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Error al obtener información de la base de datos"
+            detail="Error al obtener informacion de la base de datos"
         )
 
 
@@ -202,7 +218,6 @@ async def detailed_health_check(
     Optionally tests connectivity to:
     - Database (SQL Server)
     - LLM API (Gemini)
-    - Chart service (always healthy)
     """
     response_data = {
         "status": "healthy",
@@ -229,8 +244,7 @@ async def detailed_health_check(
             response_data["status"] = "unhealthy"
             response_data["services"] = {
                 "database": False,
-                "llm": False,
-                "chart": True
+                "llm": False
             }
 
     return HealthCheckResponse(**response_data)
@@ -249,7 +263,7 @@ async def api_info():
         "name": "Analysis API",
         "version": settings.app_version,
         "endpoints": {
-            "POST /analysis": "Analyze data with natural language prompt",
+            "POST /analysis": "Analyze data with natural language prompt (multi-query)",
             "POST /validate": "Validate a prompt without executing",
             "GET /database/info": "Get database information",
             "POST /health/detailed": "Detailed health check",

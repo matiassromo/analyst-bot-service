@@ -9,7 +9,7 @@ from unittest.mock import Mock, AsyncMock
 
 from fastapi.testclient import TestClient
 from app.main import app
-from app.models.llm_models import LLMAnalysisResponse, ChartConfig
+from app.models.llm_models import LLMMultiQueryResponse, QueryPlan
 
 
 @pytest.fixture
@@ -32,26 +32,27 @@ def mock_database_repository():
 Database Schema:
 
 Table: Products
-- product_id (int, PRIMARY KEY)
-- product_name (nvarchar(100), NOT NULL)
-- price (decimal)
+- ProductId (int, PRIMARY KEY)
+- Name (nvarchar(100), NOT NULL)
+- Price (decimal)
 
 Table: Sales
-- sale_id (int, PRIMARY KEY)
-- product_id (int, FOREIGN KEY -> Products.product_id)
-- quantity (int)
-- sale_date (datetime)
+- SaleId (int, PRIMARY KEY)
+- ProductId (int, FOREIGN KEY -> Products.ProductId)
+- Quantity (int)
+- SaleDate (datetime)
 """
 
     # Mock query results
     mock_repo.execute_query.return_value = [
-        {"product_name": "Widget A", "total_sales": 125},
-        {"product_name": "Gadget B", "total_sales": 98},
-        {"product_name": "Device C", "total_sales": 87}
+        {"Name": "Widget A", "TotalSales": 125},
+        {"Name": "Gadget B", "TotalSales": 98},
+        {"Name": "Device C", "TotalSales": 87}
     ]
 
     mock_repo.test_connection.return_value = True
     mock_repo.get_table_names.return_value = ["Products", "Sales"]
+    mock_repo.max_rows = 1000
 
     return mock_repo
 
@@ -59,50 +60,69 @@ Table: Sales
 @pytest.fixture
 def mock_llm_service():
     """
-    Mock LLM service for testing.
+    Mock LLM service for testing multi-query functionality.
     """
     mock_service = Mock()
 
-    # Create mock LLM response
-    mock_response = LLMAnalysisResponse(
-        sql_query=(
-            "SELECT TOP 10 product_name, SUM(quantity) as total_sales "
-            "FROM Sales JOIN Products ON Sales.product_id = Products.product_id "
-            "GROUP BY product_name ORDER BY total_sales DESC"
-        ),
-        explanation=(
-            "Los productos más vendidos son Widget A con 125 unidades, "
-            "Gadget B con 98 unidades y Device C con 87 unidades."
-        ),
-        chart_configs=[
-            ChartConfig(
-                type="bar",
-                title="Top 10 Productos Más Vendidos",
-                x_column="product_name",
-                y_column="total_sales",
-                x_label="Producto",
-                y_label="Ventas Totales",
-                color_palette="viridis"
+    # Create mock multi-query response
+    mock_response = LLMMultiQueryResponse(
+        queries=[
+            QueryPlan(
+                query_id="q1",
+                purpose="Obtener los productos mas vendidos",
+                sql_query=(
+                    "SELECT TOP 10 p.Name, SUM(s.Quantity) as TotalSales "
+                    "FROM Sales s JOIN Products p ON s.ProductId = p.ProductId "
+                    "GROUP BY p.Name ORDER BY TotalSales DESC"
+                )
+            ),
+            QueryPlan(
+                query_id="q2",
+                purpose="Comparar con mes anterior",
+                sql_query=(
+                    "SELECT SUM(Quantity) as LastMonthSales FROM Sales "
+                    "WHERE SaleDate >= DATEADD(month, -1, GETDATE())"
+                )
             )
         ]
     )
 
-    # Mock async method
-    mock_service.generate_analysis = AsyncMock(return_value=mock_response)
+    # Mock async methods
+    mock_service.generate_multi_query_plan = AsyncMock(return_value=mock_response)
+    mock_service.generate_unified_analysis = AsyncMock(
+        return_value=(
+            "Los productos mas vendidos son Widget A con 125 unidades, "
+            "Gadget B con 98 unidades y Device C con 87 unidades. "
+            "En comparacion con el mes anterior, las ventas se mantienen estables."
+        )
+    )
     mock_service.test_connection.return_value = True
 
     return mock_service
 
 
 @pytest.fixture
-def mock_chart_service():
+def mock_llm_service_single_query():
     """
-    Mock chart service for testing.
+    Mock LLM service that returns a single query.
     """
     mock_service = Mock()
 
-    # Return fake base64 image
-    mock_service.generate_chart.return_value = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+    mock_response = LLMMultiQueryResponse(
+        queries=[
+            QueryPlan(
+                query_id="q1",
+                purpose="Obtener el total de ventas",
+                sql_query="SELECT SUM(Quantity) as TotalSales FROM Sales"
+            )
+        ]
+    )
+
+    mock_service.generate_multi_query_plan = AsyncMock(return_value=mock_response)
+    mock_service.generate_unified_analysis = AsyncMock(
+        return_value="El total de ventas es de 310 unidades."
+    )
+    mock_service.test_connection.return_value = True
 
     return mock_service
 
@@ -115,11 +135,7 @@ def mock_query_validator():
     mock_validator = Mock()
 
     mock_validator.validate.return_value = None
-    mock_validator.sanitize_query.return_value = (
-        "SELECT TOP 10 product_name, SUM(quantity) as total_sales "
-        "FROM Sales JOIN Products ON Sales.product_id = Products.product_id "
-        "GROUP BY product_name ORDER BY total_sales DESC"
-    )
+    mock_validator.sanitize_query.side_effect = lambda q: q  # Return query as-is
 
     return mock_validator
 
@@ -127,28 +143,86 @@ def mock_query_validator():
 @pytest.fixture
 def sample_query_results() -> List[Dict[str, Any]]:
     """
-    Sample query results for testing chart generation.
+    Sample query results for testing.
     """
     return [
-        {"product_name": "Widget A", "total_sales": 125},
-        {"product_name": "Gadget B", "total_sales": 98},
-        {"product_name": "Device C", "total_sales": 87},
-        {"product_name": "Tool D", "total_sales": 76},
-        {"product_name": "Part E", "total_sales": 65}
+        {"Name": "Widget A", "TotalSales": 125},
+        {"Name": "Gadget B", "TotalSales": 98},
+        {"Name": "Device C", "TotalSales": 87},
+        {"Name": "Tool D", "TotalSales": 76},
+        {"Name": "Part E", "TotalSales": 65}
     ]
 
 
 @pytest.fixture
-def sample_chart_config() -> ChartConfig:
+def sample_multi_query_response() -> Dict[str, Any]:
     """
-    Sample chart configuration for testing.
+    Sample multi-query analysis response for testing.
     """
-    return ChartConfig(
-        type="bar",
-        title="Test Bar Chart",
-        x_column="product_name",
-        y_column="total_sales",
-        x_label="Product",
-        y_label="Sales",
-        color_palette="viridis"
-    )
+    return {
+        "analysis": (
+            "Los productos mas vendidos son Widget A con 125 unidades, "
+            "seguido por Gadget B con 98 unidades."
+        ),
+        "queries": [
+            {
+                "query_id": "q1",
+                "purpose": "Obtener los productos mas vendidos",
+                "sql_query": "SELECT TOP 10 ...",
+                "data": [
+                    {"Name": "Widget A", "TotalSales": 125},
+                    {"Name": "Gadget B", "TotalSales": 98}
+                ],
+                "row_count": 2,
+                "error": None
+            },
+            {
+                "query_id": "q2",
+                "purpose": "Obtener ventas del mes anterior",
+                "sql_query": "SELECT SUM(...)",
+                "data": [{"LastMonthSales": 850}],
+                "row_count": 1,
+                "error": None
+            }
+        ],
+        "metadata": {
+            "total_queries": 2,
+            "successful_queries": 2,
+            "total_rows": 3,
+            "execution_time_ms": 150
+        }
+    }
+
+
+@pytest.fixture
+def sample_partial_failure_response() -> Dict[str, Any]:
+    """
+    Sample response where one query failed.
+    """
+    return {
+        "analysis": "Se obtuvo informacion parcial debido a un error en una consulta.",
+        "queries": [
+            {
+                "query_id": "q1",
+                "purpose": "Obtener los productos mas vendidos",
+                "sql_query": "SELECT TOP 10 ...",
+                "data": [{"Name": "Widget A", "TotalSales": 125}],
+                "row_count": 1,
+                "error": None
+            },
+            {
+                "query_id": "q2",
+                "purpose": "Consulta con error",
+                "sql_query": "SELECT * FROM NonExistentTable",
+                "data": [],
+                "row_count": 0,
+                "error": "Error de base de datos: Table not found"
+            }
+        ],
+        "metadata": {
+            "total_queries": 2,
+            "successful_queries": 1,
+            "total_rows": 1,
+            "execution_time_ms": 100
+        }
+    }

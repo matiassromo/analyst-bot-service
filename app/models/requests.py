@@ -24,14 +24,11 @@ class AnalysisRequest(BaseModel):
         description="Optional list of table names to exclude from analysis"
     )
 
-    generate_charts: Optional[bool] = Field(
-        None,
-        description=(
-            "Whether to generate charts. "
-            "If None (default), the LLM decides based on necessity. "
-            "If True, always generate charts. "
-            "If False, never generate charts."
-        )
+    max_queries: int = Field(
+        default=5,
+        ge=1,
+        le=5,
+        description="Maximum number of queries to generate (1-5)"
     )
 
     @field_validator('prompt')
@@ -52,24 +49,14 @@ class AnalysisRequest(BaseModel):
         "json_schema_extra": {
             "examples": [
                 {
-                    "prompt": "¿Cuál es el producto más vendido de la semana?",
+                    "prompt": "Cual es el producto mas vendido de la semana?",
                     "exclude_tables": None,
-                    "generate_charts": None
+                    "max_queries": 5
                 },
                 {
-                    "prompt": "¿Cuáles son las ventas totales por categoría este mes?",
+                    "prompt": "Cuales son las ventas totales por categoria este mes y como se comparan con el mes pasado?",
                     "exclude_tables": ["SensitiveData", "InternalLogs"],
-                    "generate_charts": True
-                },
-                {
-                    "prompt": "Muéstrame la tendencia de ventas en los últimos 30 días",
-                    "exclude_tables": None,
-                    "generate_charts": None
-                },
-                {
-                    "prompt": "Dame el total de ventas del año",
-                    "exclude_tables": None,
-                    "generate_charts": False
+                    "max_queries": 3
                 }
             ]
         }
