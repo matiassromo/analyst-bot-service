@@ -371,7 +371,14 @@ Respond with ONLY the JSON object, no additional text."""
         for ch in text:
             if in_string:
                 if escape:
-                    result.append(ch)
+                    if ch == "\r":
+                        result.append("r")
+                    elif ch == "\n":
+                        result.append("n")
+                    elif ch == "\t":
+                        result.append("t")
+                    else:
+                        result.append(ch)
                     escape = False
                     continue
                 if ch == "\\":
