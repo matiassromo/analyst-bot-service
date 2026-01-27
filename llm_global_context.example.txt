@@ -1,2 +1,9 @@
-- When you refer to TODAY use GETDATE()-1 instead of GETDATE()
+- When referring to TODAY or the current date, use this timezone-aware expression instead of GETDATE():
+  CAST(GETDATE() AT TIME ZONE 'UTC' AT TIME ZONE 'SA Pacific Standard Time' AS DATE)
+- When you need the current datetime (not just date), use:
+  GETDATE() AT TIME ZONE 'UTC' AT TIME ZONE 'SA Pacific Standard Time'
+- Azure SQL Server uses UTC by default; 'SA Pacific Standard Time' is Colombia (UTC-5)
 - CRITICAL GROUP BY RULE: When using aggregate functions (SUM, COUNT, AVG, MAX, MIN, etc.), ALL non-aggregated columns in the SELECT clause MUST be included in the GROUP BY clause. This is mandatory in SQL Server.
+- Example of valid SQL query to prompt: Cual es el producto mas vendido de la semana?
+SELECT TOP 1 bp.Name AS NombreProducto, SUM(bod.Qty) AS CantidadTotalVendida FROM BarOrderDetails AS bod JOIN BarProducts AS bp ON bod.BarProductId = bp.Id JOIN TransactionItem AS ti ON bod.BarOrderId = ti.Id JOIN Transactions AS t ON ti.TransactionId = t.Id WHERE t.OpenedAt >= DATEADD(wk, DATEDIFF(wk, 0, CAST(GETDATE() AT TIME ZONE 'UTC' AT TIME ZONE 'SA Pacific Standard Time' AS DATE)), 0) AND t.OpenedAt < DATEADD(wk, DATEDIFF(wk, 0, CAST(GETDATE() AT TIME ZONE 'UTC' AT TIME ZONE 'SA Pacific Standard Time' AS DATE)), 7) GROUP BY bp.Name ORDER BY CantidadTotalVendida DESC
+- If asked something like "Cuantas personas entraron en el establecimiento?" se refiere tanto a la tabla de TransactionItem (TransactionType='EntranceTransaction')como EntranceAccessCards

@@ -30,7 +30,7 @@ class LLMService:
     """
 
     SYSTEM_PROMPT_MULTI_QUERY = """You are an expert SQL analyst for a business database. Given a database schema and a user question in Spanish, you must generate 1-5 SQL queries to comprehensively answer the question.
-
+{global_context_section}
 Generate multiple queries when:
 - The question has multiple parts (e.g., "top products AND monthly trends")
 - Comparison data is needed (e.g., "this month vs last month")
@@ -74,9 +74,8 @@ QUERY RULES:
 - Each purpose must be in Spanish and describe what that specific query answers
 - Queries should be complementary - together they should fully answer the user's question
 - Order queries logically (main query first, supporting/comparison queries after)
-- JSON strings must be valid: do NOT include raw newlines inside string values
-  * If you need line breaks in sql_query, use \\n inside the string
-  * Ensure the JSON is complete and strictly valid
+- IMPORTANT: Write all SQL queries on a SINGLE LINE. Do not use newlines or formatting in sql_query values.
+- Ensure the JSON is complete and strictly valid
 
 Database Schema:
 {schema}
@@ -112,34 +111,50 @@ Respond with ONLY the JSON object, no additional text."""
         # Initialize Gemini client with API key
         self.client = genai.Client(api_key=self.api_key)
 
-        # Configure generation settings
+        # Common safety settings
+        self._safety_settings = [
+            types.SafetySetting(
+                category='HARM_CATEGORY_HARASSMENT',
+                threshold='BLOCK_NONE'
+            ),
+            types.SafetySetting(
+                category='HARM_CATEGORY_HATE_SPEECH',
+                threshold='BLOCK_NONE'
+            ),
+            types.SafetySetting(
+                category='HARM_CATEGORY_SEXUALLY_EXPLICIT',
+                threshold='BLOCK_NONE'
+            ),
+            types.SafetySetting(
+                category='HARM_CATEGORY_DANGEROUS_CONTENT',
+                threshold='BLOCK_NONE'
+            ),
+        ]
+
+        # Configure generation settings for JSON responses (queries)
         self.generation_config = types.GenerateContentConfig(
             temperature=0.2,  # More deterministic
             top_p=0.95,
             top_k=40,
             max_output_tokens=4096,
             response_mime_type="application/json",
-            safety_settings=[
-                types.SafetySetting(
-                    category='HARM_CATEGORY_HARASSMENT',
-                    threshold='BLOCK_NONE'
-                ),
-                types.SafetySetting(
-                    category='HARM_CATEGORY_HATE_SPEECH',
-                    threshold='BLOCK_NONE'
-                ),
-                types.SafetySetting(
-                    category='HARM_CATEGORY_SEXUALLY_EXPLICIT',
-                    threshold='BLOCK_NONE'
-                ),
-                types.SafetySetting(
-                    category='HARM_CATEGORY_DANGEROUS_CONTENT',
-                    threshold='BLOCK_NONE'
-                ),
-            ]
+            safety_settings=self._safety_settings
+        )
+
+        # Configure generation settings for text responses (analysis)
+        self.generation_config_text = types.GenerateContentConfig(
+            temperature=0.3,
+            top_p=0.95,
+            top_k=40,
+            max_output_tokens=4096,
+            safety_settings=self._safety_settings
         )
 
         logger.info(f"LLM service initialized with model: {self.model_name}")
+        if self.global_context:
+            logger.info(f"Global context loaded ({len(self.global_context)} chars)")
+        else:
+            logger.warning("No global context loaded - check LLM_GLOBAL_CONTEXT_PATH or LLM_GLOBAL_CONTEXT")
 
     async def generate_multi_query_plan(
         self,
@@ -219,26 +234,34 @@ Respond with ONLY the JSON object, no additional text."""
         Returns:
             Formatted prompt string
         """
+        # Build global context section (placed at the top for priority)
+        global_context_section = ""
+        if self.global_context:
+            global_context_section = f"\nIMPORTANT BUSINESS RULES (follow these strictly):\n{self.global_context}\n"
+
         prompt = self.SYSTEM_PROMPT_MULTI_QUERY.format(
             schema=context.database_schema,
             prompt=context.user_prompt,
-            max_queries=max_queries
+            max_queries=max_queries,
+            global_context_section=global_context_section
         )
-
-        if self.global_context:
-            prompt += f"\n\nGlobal Context:\n{self.global_context}"
 
         if context.additional_context:
             prompt += f"\n\nAdditional Context: {context.additional_context}"
 
         return prompt
 
-    async def _call_gemini_api(self, prompt: str) -> str:
+    async def _call_gemini_api(
+        self,
+        prompt: str,
+        config: Optional[types.GenerateContentConfig] = None
+    ) -> str:
         """
         Call Gemini API with retry logic.
 
         Args:
             prompt: Complete prompt string
+            config: Optional generation config (defaults to JSON config)
 
         Returns:
             Raw response text from Gemini
@@ -248,6 +271,7 @@ Respond with ONLY the JSON object, no additional text."""
         """
         max_retries = 2
         retry_count = 0
+        use_config = config or self.generation_config
 
         while retry_count <= max_retries:
             try:
@@ -257,7 +281,7 @@ Respond with ONLY the JSON object, no additional text."""
                 response = self.client.models.generate_content(
                     model=self.model_name,
                     contents=prompt,
-                    config=self.generation_config
+                    config=use_config
                 )
 
                 # Check if response has text
@@ -266,8 +290,25 @@ Respond with ONLY the JSON object, no additional text."""
                     raise LLMAPIError("Empty response from Gemini API")
 
                 logger.debug(f"Received response from Gemini ({len(response.text)} chars)")
+
+                # Check for truncated JSON response (only for JSON config)
+                if use_config == self.generation_config and not self._is_json_complete(response.text):
+                    retry_count += 1
+                    logger.warning(
+                        f"Truncated response detected ({len(response.text)} chars), "
+                        f"retrying ({retry_count}/{max_retries + 1})..."
+                    )
+                    if retry_count > max_retries:
+                        logger.error(f"Truncated response after {max_retries + 1} attempts")
+                        raise LLMAPIError(
+                            f"Gemini API returned truncated response after {max_retries + 1} attempts"
+                        )
+                    continue
+
                 return response.text
 
+            except LLMAPIError:
+                raise
             except Exception as e:
                 retry_count += 1
                 logger.warning(f"Gemini API call failed (attempt {retry_count}): {e}")
@@ -412,6 +453,36 @@ Respond with ONLY the JSON object, no additional text."""
 
         return "".join(result)
 
+    @staticmethod
+    def _is_json_complete(text: str) -> bool:
+        """Check if JSON appears structurally complete."""
+        text = text.strip()
+        if not text:
+            return False
+        # Must start with { and end with }
+        if not (text.startswith("{") and text.endswith("}")):
+            return False
+        # Check balanced braces (simple heuristic)
+        brace_count = 0
+        in_string = False
+        escape = False
+        for ch in text:
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"' and not escape:
+                in_string = not in_string
+                continue
+            if not in_string:
+                if ch == "{":
+                    brace_count += 1
+                elif ch == "}":
+                    brace_count -= 1
+        return brace_count == 0
+
     async def generate_unified_analysis(
         self,
         user_prompt: str,
@@ -473,8 +544,11 @@ Respond with ONLY the analysis text in Spanish, no JSON or additional formatting
 
             logger.info(f"Generating unified analysis from {len(query_results)} query results...")
 
-            # Call Gemini API
-            response = await self._call_gemini_api(analysis_prompt)
+            # Call Gemini API with text config (not JSON)
+            response = await self._call_gemini_api(
+                analysis_prompt,
+                config=self.generation_config_text
+            )
 
             # Clean and return analysis
             analysis = response.strip()
