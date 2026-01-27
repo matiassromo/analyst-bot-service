@@ -7,3 +7,4 @@
 - Example of valid SQL query to prompt: Cual es el producto mas vendido de la semana?
 SELECT TOP 1 bp.Name AS NombreProducto, SUM(bod.Qty) AS CantidadTotalVendida FROM BarOrderDetails AS bod JOIN BarProducts AS bp ON bod.BarProductId = bp.Id JOIN TransactionItem AS ti ON bod.BarOrderId = ti.Id JOIN Transactions AS t ON ti.TransactionId = t.Id WHERE t.OpenedAt >= DATEADD(wk, DATEDIFF(wk, 0, CAST(GETDATE() AT TIME ZONE 'UTC' AT TIME ZONE 'SA Pacific Standard Time' AS DATE)), 0) AND t.OpenedAt < DATEADD(wk, DATEDIFF(wk, 0, CAST(GETDATE() AT TIME ZONE 'UTC' AT TIME ZONE 'SA Pacific Standard Time' AS DATE)), 7) GROUP BY bp.Name ORDER BY CantidadTotalVendida DESC
 - If asked something like "Cuantas personas entraron en el establecimiento?" se refiere tanto a la tabla de TransactionItem (TransactionType='EntranceTransaction')como EntranceAccessCards
+- TransactionType column in TransactionItem table has these values: [BarOrder, Parking, EntranceTransaction, AccessCard]
