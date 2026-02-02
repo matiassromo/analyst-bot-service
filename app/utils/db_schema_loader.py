@@ -39,6 +39,7 @@ class SchemaLoader:
 
         try:
             tables = self._get_tables_info(exclude_tables)
+            tables = self._apply_column_allowlist(tables, {"Clients": ["Id"]})
             return self._format_schema(tables)
         except Exception as e:
             logger.error(f"Failed to load database schema: {e}")
@@ -188,6 +189,36 @@ class SchemaLoader:
             schema_lines.append("")  # Empty line between tables
 
         return "\n".join(schema_lines)
+
+    def _apply_column_allowlist(
+        self,
+        tables_info: Dict,
+        allowed_columns_by_table: Dict[str, List[str]],
+    ) -> Dict:
+        if not allowed_columns_by_table:
+            return tables_info
+
+        filtered = {}
+        for table_name, info in tables_info.items():
+            allowed = allowed_columns_by_table.get(table_name)
+            if not allowed:
+                filtered[table_name] = info
+                continue
+
+            allowed_set = set(allowed)
+            columns = [c for c in info["columns"] if c.COLUMN_NAME in allowed_set]
+            primary_keys = [pk for pk in info["primary_keys"] if pk in allowed_set]
+            foreign_keys = [
+                fk for fk in info["foreign_keys"] if fk.COLUMN_NAME in allowed_set
+            ]
+
+            filtered[table_name] = {
+                "columns": columns,
+                "primary_keys": primary_keys,
+                "foreign_keys": foreign_keys,
+            }
+
+        return filtered
 
     def get_table_names(self) -> List[str]:
         """

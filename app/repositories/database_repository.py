@@ -139,6 +139,8 @@ class DatabaseRepository:
             except QueryValidationError as e:
                 logger.error(f"Query validation failed: {e}")
                 raise
+        elif self.query_validator:
+            self.query_validator._check_clients_id_only(query)
 
         # Execute query
         try:

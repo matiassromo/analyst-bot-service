@@ -132,6 +132,7 @@ class QueryValidator:
 
         # Check 5: Ensure TOP clause or add warning if missing
         self._check_row_limit(normalized_query)
+        self._check_clients_id_only(query)
 
         logger.info(f"Query validated successfully: {query[:100]}...")
 
@@ -191,6 +192,55 @@ class QueryValidator:
                     raise QueryValidationError(
                         f"TOP value ({top_value}) exceeds maximum "
                         f"allowed rows ({self.max_rows})"
+                    )
+
+    def _check_clients_id_only(self, query: str) -> None:
+        if not re.search(r"\bFROM\s+Clients\b|\bJOIN\s+Clients\b", query, re.IGNORECASE):
+            return
+
+        select_match = re.search(r"\bSELECT\b(.*?)\bFROM\b", query, re.IGNORECASE | re.DOTALL)
+        if not select_match:
+            return
+
+        select_list = select_match.group(1)
+        if re.search(r"\*", select_list):
+            raise QueryValidationError(
+                "Clients table cannot be selected with '*'. Only Id is allowed."
+            )
+
+        disallowed = re.findall(
+            r"\bClients\.([A-Za-z_][A-Za-z0-9_]*)\b", select_list, re.IGNORECASE
+        )
+        for col in disallowed:
+            if col.lower() != "id":
+                raise QueryValidationError(
+                    "Only Clients.Id can be selected from Clients."
+                )
+
+        qualified_stripped = re.sub(
+            r"\b[A-Za-z_][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\b",
+            " ",
+            select_list,
+        )
+        bare_cols = re.findall(r"\b([A-Za-z_][A-Za-z0-9_]*)\b", qualified_stripped)
+        for col in bare_cols:
+            if col.lower() not in {"select", "distinct", "top", "id", "as"}:
+                raise QueryValidationError(
+                    "Only Id can be selected when querying Clients."
+                )
+
+        where_on = re.findall(
+            r"\b(WHERE|ON)\b(.*?)(\bGROUP\b|\bORDER\b|\bHAVING\b|$)",
+            query,
+            re.IGNORECASE | re.DOTALL,
+        )
+        for _, clause, _ in where_on:
+            for col in re.findall(
+                r"\bClients\.([A-Za-z_][A-Za-z0-9_]*)\b", clause, re.IGNORECASE
+            ):
+                if col.lower() != "id":
+                    raise QueryValidationError(
+                        "Only Clients.Id can be used in WHERE/JOIN conditions."
                     )
 
     def sanitize_query(self, query: str) -> str:
