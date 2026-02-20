@@ -33,10 +33,11 @@ class Settings(BaseSettings):
     db_password: str = ""
     db_driver: str = "ODBC Driver 18 for SQL Server"
     db_auth_type: Literal["windows", "sql", "auto"] = "auto"
+    db_trust_server_certificate: bool = False
 
     # Google Gemini API
     gemini_api_key: str
-    gemini_model: str = "gemini-1.5-pro"
+    gemini_model: str = "gemini-2.5-flash"
 
     # LLM Global Context
     llm_global_context: str = ""
@@ -87,7 +88,8 @@ class Settings(BaseSettings):
                 f"TrustServerCertificate=no;"
             )
         else:
-            return base + "Trusted_Connection=yes"
+            trust = "yes" if self.db_trust_server_certificate else "no"
+            return base + f"Trusted_Connection=yes;TrustServerCertificate={trust};"
 
     @property
     def is_development(self) -> bool:

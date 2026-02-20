@@ -3,8 +3,10 @@ LLM service for Google Gemini API integration.
 Generates SQL queries and analysis from natural language prompts.
 """
 
+import asyncio
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from google import genai
@@ -316,6 +318,14 @@ Respond with ONLY the JSON object, no additional text."""
                 if retry_count > max_retries:
                     logger.error(f"Gemini API call failed after {max_retries} retries")
                     raise LLMAPIError(f"Gemini API call failed: {e}")
+
+                # On 429 rate limit, wait the suggested retry delay before next attempt
+                error_str = str(e)
+                if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                    match = re.search(r"retry in (\d+(?:\.\d+)?)s", error_str)
+                    wait_seconds = float(match.group(1)) if match else 15.0
+                    logger.info(f"Rate limited. Waiting {wait_seconds:.1f}s before retry...")
+                    await asyncio.sleep(wait_seconds)
 
         raise LLMAPIError("Failed to call Gemini API after retries")
 
